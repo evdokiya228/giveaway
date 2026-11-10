@@ -6,12 +6,31 @@ const ALLOWED_HOST = 'forum.comeback.pw';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
+// Принимается ТОЛЬКО https://forum.comeback.pw/... (без порта, логина и поддоменов)
 function parseUrl(input) {
   let u;
   try { u = new URL(input); } catch { return null; }
   if (u.protocol !== 'https:' || u.hostname !== ALLOWED_HOST) return null;
+  if (u.port || u.username || u.password) return null;
   u.hash = '';
   return u;
+}
+
+// Загрузка с ручной обработкой редиректов: на чужой домен не уходим никогда
+async function safeFetch(startUrl) {
+  let url = startUrl;
+  for (let i = 0; i < 4; i++) {
+    const r = await fetch(url, { redirect: 'manual', headers: { 'User-Agent': UA, 'Accept-Language': 'ru' } });
+    if (r.status >= 300 && r.status < 400) {
+      const loc = r.headers.get('location');
+      const nu = loc && parseUrl(new URL(loc, url).href);
+      if (!nu) throw new Error('Форум перенаправил на недопустимый адрес — запрос отклонён');
+      url = nu.href;
+      continue;
+    }
+    return r;
+  }
+  throw new Error('Слишком много перенаправлений');
 }
 
 module.exports = async (req, res) => {
@@ -19,7 +38,7 @@ module.exports = async (req, res) => {
   if (!u) return res.status(400).json({ error: `Допускаются только ссылки https://${ALLOWED_HOST}/...` });
 
   try {
-    const r = await fetch(u.href, { headers: { 'User-Agent': UA, 'Accept-Language': 'ru' } });
+    const r = await safeFetch(u.href);
     if (!r.ok) return res.status(502).json({ error: `Форум ответил HTTP ${r.status}` });
     const html = await r.text();
     const $ = cheerio.load(html);
