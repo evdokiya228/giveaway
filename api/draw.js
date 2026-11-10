@@ -24,6 +24,7 @@ function threadId(input) {
   let u;
   try { u = new URL(input); } catch { return null; }
   if (u.protocol !== 'https:' || u.hostname !== ALLOWED_HOST) return null;
+  if (u.port || u.username || u.password) return null;
   const m = u.pathname.match(/^\/threads\/[^/]*\.(\d+)(?:\/|$)/);
   return m ? m[1] : null;
 }
@@ -54,15 +55,6 @@ module.exports = async (req, res) => {
     if (!id) return res.status(400).json({ error: `Нужна ссылка на тему https://${ALLOWED_HOST}/threads/...` });
     const key = `draw:${id}`;
 
-    // Сброс только для админа: старый результат архивируется, а не удаляется
-    if (body.reset) {
-      const admin = process.env.ADMIN_TOKEN;
-      if (!admin || body.token !== admin) return res.status(403).json({ error: 'Неверный админ-токен' });
-      const exists = await redis(['EXISTS', key]);
-      if (exists) await redis(['RENAME', key, `${key}:archived:${Date.now()}`]);
-      return res.json({ reset: true });
-    }
-
     // Уже разыгрывали — отдаём сохранённое, ничего не пересчитываем
     const existing = await redis(['GET', key]);
     if (existing) return res.json({ exists: true, result: JSON.parse(existing) });
@@ -75,7 +67,7 @@ module.exports = async (req, res) => {
     posts = posts.slice(0, 50000).map((p) => ({
       postId: String(p.postId || ''), number: String(p.number || ''), author: String(p.author || ''),
       text: String(p.text || '').slice(0, 400), url: String(p.url || ''),
-    })).filter((p) => p.author && p.url.startsWith(`https://${ALLOWED_HOST}/posts/`));
+    })).filter((p) => p.author && /^https:\/\/forum\.comeback\.pw\/posts\/\d+\/$/.test(p.url));
 
     const total = posts.length;
     const starter = posts[0] && posts[0].author;
@@ -98,7 +90,7 @@ module.exports = async (req, res) => {
     const participants = pool.map((p) => ({ author: p.author, number: p.number, url: p.url }));
     const result = {
       threadId: id,
-      url: body.url,
+      url: `https://${ALLOWED_HOST}/threads/${id}/`,
       drawnAt: new Date().toISOString(),
       settings: { count, uniqueUsers: !!s.uniqueUsers, excludeAuthor: !!s.excludeAuthor, keyword: kw, minLength: minLen, skipFirst: parseInt(s.skipFirst, 10) || 0 },
       total,
