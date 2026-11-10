@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Определение победителей</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:760px;margin:32px auto;padding:0 16px;color:#222}
+  label{display:block;margin:12px 0 4px;font-weight:600}
+  input[type=text],input[type=number],input[type=password]{width:100%;padding:8px;box-sizing:border-box;font-size:15px}
+  .row{display:flex;gap:16px}.row>div{flex:1}
+  .chk{font-weight:400;display:flex;gap:8px;align-items:center;margin:8px 0}
+  button{margin-top:16px;padding:10px 20px;font-size:16px;cursor:pointer}
+  .win{border:1px solid #ccc;border-radius:8px;padding:12px;margin:10px 0;background:#f8fbff}
+  .win b{font-size:17px}.meta{color:#666;font-size:13px}.err{color:#b00020}
+  .banner{background:#fff4d6;border:1px solid #e6c766;border-radius:8px;padding:10px 12px;margin:16px 0}
+  details{margin-top:20px} code{word-break:break-all;font-size:12px}
+</style></head><body>
+<h1>Определение победителей</h1>
+<label>Ссылка на тему (forum.comeback.pw)</label>
+<input type="text" id="url" placeholder="https://forum.comeback.pw/threads/...">
+<div class="row">
+  <div><label>Количество победителей</label><input type="number" id="count" value="1" min="1"></div>
+  <div><label>Пропустить первые N сообщений</label><input type="number" id="skip" value="0" min="0"></div>
+</div>
+<div class="row">
+  <div><label>Ключевое слово в сообщении (необязательно)</label><input type="text" id="kw"></div>
+  <div><label>Мин. длина сообщения</label><input type="number" id="minlen" value="0" min="0"></div>
+</div>
+<label class="chk"><input type="checkbox" id="uniq" checked> Один шанс на участника (по нику)</label>
+<label class="chk"><input type="checkbox" id="exa" checked> Исключить автора темы</label>
+<button id="go">Определить победителей</button>
+<div id="out"></div>
+
+<details>
+  <summary>Админ: сбросить результат темы</summary>
+  <label>Админ-токен</label><input type="password" id="tok">
+  <button id="reset">Сбросить (результат уйдёт в архив)</button>
+</details>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function firstPageUrl(input) {
+  const u = new URL(input);
+  u.hash = ''; u.search = '';
+  u.pathname = u.pathname.replace(/\/page-\d+\/?$/, '/').replace(/\/?$/, '/');
+  return u.href;
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || 'Ошибка ' + r.status);
+  return d;
+}
+
+async function loadAllPosts(startUrl, onProgress) {
+  const all = [];
+  let url = startUrl, page = 0;
+  const seen = new Set();
+  while (url && !seen.has(url) && page < 300) {
+    seen.add(url); page++;
+    let data;
+    for (let attempt = 1; ; attempt++) {
+      try { data = await api('/api/page?url=' + encodeURIComponent(url)); break; }
+      catch (e) { if (attempt >= 3) throw e; await sleep(1000 * attempt); }
+    }
+    all.push(...data.posts);
+    onProgress(page, all.length);
+    url = data.next;
+    if (url) await sleep(300);
+  }
+  return all;
+}
+
+function render(result, alreadyDone) {
+  const when = new Date(result.drawnAt).toLocaleString('ru-RU');
+  let h = '';
+  if (alreadyDone) {
+    h += '<div class="banner">Розыгрыш по этой теме уже проводился <b>' + esc(when) +
+         '</b>. Повторно провести его нельзя — ниже сохранённый результат.</div>';
+  } else {
+    h += '<p class="meta">Розыгрыш проведён и сохранён: ' + esc(when) + '</p>';
+  }
+  h += '<p class="meta">Всего сообщений в теме: ' + result.total + ' · участвовало: ' + result.eligible + '</p>';
+  result.winners.forEach((w, i) => {
+    h += '<div class="win"><b>' + (i + 1) + '. ' + esc(w.author) + '</b> <span class="meta">' + esc(w.number) +
+      ' · <a href="' + esc(w.url) + '" target="_blank" rel="noopener">открыть сообщение</a></span><p>' +
+      esc(w.text || '(без текста)') + '</p></div>';
+  });
+  h += '<details><summary>Список всех участников (' + result.participants.length + ')</summary><ol>' +
+    result.participants.map((p) => '<li>' + esc(p.author) + ' <span class="meta">' + esc(p.number) + '</span></li>').join('') +
+    '</ol><p class="meta">SHA-256 списка участников:<br><code>' + esc(result.participantsHash) + '</code></p></details>';
+  $('out').innerHTML = h;
+}
+
+$('go').onclick = async () => {
+  const out = $('out'); $('go').disabled = true;
+  try {
+    const raw = $('url').value.trim();
+    if (!raw) throw new Error('Вставь ссылку на тему');
+
+    // 1) Уже разыгрывали?
+    out.innerHTML = '<p>Проверяю, был ли розыгрыш…</p>';
+    const check = await api('/api/draw?url=' + encodeURIComponent(raw));
+    if (check.exists) return render(check.result, true);
+
+    // 2) Грузим все сообщения темы
+    const posts = await loadAllPosts(firstPageUrl(raw), (p, c) => {
+      out.innerHTML = '<p>Загружаю… страница ' + p + ', сообщений: ' + c + '</p>';
+    });
+    // Текст обрезаем, чтобы запрос не превысил лимит размера
+    const slim = posts.map((p) => ({ ...p, text: p.text.slice(0, 400) }));
+
+    // 3) Жеребьёвка и сохранение на сервере
+    out.innerHTML = '<p>Провожу розыгрыш…</p>';
+    const d = await api('/api/draw', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: raw, posts: slim,
+        settings: {
+          count: +$('count').value, skipFirst: +$('skip').value, keyword: $('kw').value,
+          minLength: +$('minlen').value, uniqueUsers: $('uniq').checked, excludeAuthor: $('exa').checked,
+        },
+      }),
+    });
+    render(d.result, d.exists);
+  } catch (e) {
+    out.innerHTML = '<p class="err">' + esc(e.message) + '</p>';
+  } finally { $('go').disabled = false; }
+};
+
+$('reset').onclick = async () => {
+  try {
+    const raw = $('url').value.trim();
+    if (!raw) throw new Error('Сначала вставь ссылку на тему');
+    if (!confirm('Сбросить результат для этой темы? Он будет перенесён в архив.')) return;
+    await api('/api/draw', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: raw, reset: true, token: $('tok').value }),
+    });
+    $('out').innerHTML = '<p>Результат сброшен. Можно проводить розыгрыш заново.</p>';
+  } catch (e) { $('out').innerHTML = '<p class="err">' + esc(e.message) + '</p>'; }
+};
+</script></body></html>
